@@ -1,6 +1,6 @@
 # NTele Decision
 
-A typed text-decision service for NTele-Hybrid-27B-v1, backed by SGLang.
+A typed text-decision service for [NTele-Hybrid-27B-v1](https://huggingface.co/ZTE-AIM/NTele-Hybrid-27B-v1), backed by SGLang.
 Exposes `/v1/systemone` for the official Decision Index HTTP engine, inspired by the serving design and publicly described wide-choice algorithm of
 [StartLux-Decision](https://github.com/StartLuxLabs/StartLux-Decision).
 
