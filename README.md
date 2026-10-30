@@ -1,12 +1,9 @@
 # NTele Decision
 
 A typed text-decision service for NTele-Hybrid-27B-v1, backed by SGLang.
-Exposes `/v1/systemone` for the official Decision Index HTTP engine.
-
-Inspired by the serving design and publicly described wide-choice algorithm of
+Exposes `/v1/systemone` for the official Decision Index HTTP engine, inspired by the serving design and publicly described wide-choice algorithm of
 [StartLux-Decision](https://github.com/StartLuxLabs/StartLux-Decision).
-Independently implemented: no StartLux code is copied, vendored or imported.
-NTele retains its SGLang prompt and causal attention, not StartLux's attention changes.
+
 
 ## Installation
 
