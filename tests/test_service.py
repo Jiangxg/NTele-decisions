@@ -1,4 +1,5 @@
 import asyncio
+import importlib.util
 import math
 import unittest
 
@@ -29,15 +30,13 @@ def request(n):
 
 
 class Tests(unittest.IsolatedAsyncioTestCase):
-    async def test_widths_and_official_validator(self):
-        from decision_index.engines.base import validate
+    async def test_widths(self):
         for n in [1, 2, 26, 27, 77, 151, 255]:
             with self.subTest(n=n):
                 fake = Fake()
                 service = DecisionService(Settings(), fake)
                 body = request(n)
                 result = await service.decide(body)
-                validate(body['questions'], result)
                 p = result['answers']['q']['probabilities']
                 self.assertEqual(list(p), list(body['questions']['q']['criteria']))
                 self.assertAlmostEqual(sum(p.values()), 1)
@@ -48,6 +47,15 @@ class Tests(unittest.IsolatedAsyncioTestCase):
                 if n > 26:
                     offered = [o['name'] for _, q in fake.calls[:-1] for o in q['options']]
                     self.assertEqual(offered, list(p))
+
+    @unittest.skipUnless(importlib.util.find_spec("decision_index"), "optional decision_index package not installed")
+    async def test_official_validator(self):
+        from decision_index.engines.base import validate
+        for n in [1, 2, 26, 27, 77, 151, 255]:
+            with self.subTest(n=n):
+                body = request(n)
+                result = await DecisionService(Settings(), Fake()).decide(body)
+                validate(body['questions'], result)
 
     async def test_noul_score_and_multiple(self):
         fake = Fake()

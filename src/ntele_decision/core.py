@@ -23,6 +23,13 @@ class BackendError(RuntimeError):
     pass
 
 
+def create_service(cfg, backend=None):
+    if cfg.backend == "vllm":
+        from .vllm import VLLMBackend, VLLMDecisionService
+        return VLLMDecisionService(cfg, backend or VLLMBackend(cfg))
+    return DecisionService(cfg, backend or SGLangBackend(cfg))
+
+
 @dataclass(frozen=True)
 class Settings:
     model: str = "NTele-Hybrid-27B-v1"
@@ -31,8 +38,11 @@ class Settings:
     max_options: int = 255
     backend_concurrency: int = 4
     timeout: float = 600
+    backend: str = "sglang"
 
     def __post_init__(self):
+        if self.backend not in {"sglang", "vllm"}:
+            raise ValueError("backend must be sglang or vllm")
         if not math.isfinite(self.temperature) or self.temperature <= 0:
             raise ValueError("temperature must be finite and positive")
         if not 26 <= self.max_options <= 255 or self.backend_concurrency < 1:
@@ -54,6 +64,49 @@ def distribution(value, keys):
 def text(value):
     # Preserve structured text; represent empty inputs literally for RequiredDecisionText.
     return '""' if value == "" else "{}" if value == {} else "[]" if value == [] else value
+
+
+def choice_groups(keys):
+    count = math.ceil(len(keys) / 25)
+    width, extra = divmod(len(keys), count)
+    groups, offset = [], 0
+    for i in range(count):
+        end = offset + width + (i < extra)
+        groups.append(keys[offset:end])
+        offset = end
+    return groups
+
+
+def choice_finalists(groups, rounds):
+    first, selected = {}, []
+    for group, probs in zip(groups, rounds):
+        first.update(probs)
+        selected.extend(sorted(group, key=lambda k: -probs[k])[:3])
+    if len(selected) > 26:
+        selected = sorted(selected, key=lambda k: -first[k])[:26]
+    return first, selected
+
+
+def choice_distribution(keys, first, final):
+    eliminated = [k for k in keys if k not in final]
+    total = math.fsum(first[k] for k in eliminated)
+    probs = {k: final[k] * 0.999 if k in final else
+             0.001 * (first[k] / total if total else 1 / len(eliminated)) for k in keys}
+    return distribution(probs, keys)
+
+
+def answer(q, probs):
+    typ = q["type"]
+    if typ == "choice":
+        return {"type": typ, "choice": max(probs, key=probs.get), "probabilities": probs}
+    if typ == "noul":
+        return {"type": typ, "noul": probs["yes"], "probabilities": probs}
+    criteria = q["criteria"]
+    ids = [str(i) for i in range(len(criteria))]
+    names = list(criteria) if isinstance(criteria, dict) else ids
+    mapped = {name: probs[i] for name, i in zip(names, ids)}
+    return {"type": typ, "score": math.fsum(float(k) * v for k, v in mapped.items()),
+            "probabilities": mapped}
 
 
 def validate(body, cfg):
@@ -161,26 +214,11 @@ class DecisionService:
         if len(keys) <= 26:
             probs, tokens = await run(keys)
             return probs, tokens, 1
-        count = math.ceil(len(keys) / 25)
-        width, extra = divmod(len(keys), count)
-        groups, offset = [], 0
-        for i in range(count):
-            end = offset + width + (i < extra)
-            groups.append(keys[offset:end])
-            offset = end
+        groups = choice_groups(keys)
         rounds = await asyncio.gather(*(run(g) for g in groups))
-        first, selected = {}, []
-        for group, (probs, _) in zip(groups, rounds):
-            first.update(probs)
-            selected.extend(sorted(group, key=lambda k: -probs[k])[:3])
-        if len(selected) > 26:
-            selected = sorted(selected, key=lambda k: -first[k])[:26]
+        first, selected = choice_finalists(groups, [p for p, _ in rounds])
         final, tokens = await run(selected)
-        eliminated = [k for k in keys if k not in final]
-        total = math.fsum(first[k] for k in eliminated)
-        probs = {k: final[k] * 0.999 if k in final else
-                 0.001 * (first[k] / total if total else 1 / len(eliminated)) for k in keys}
-        return distribution(probs, keys), tokens + sum(t for _, t in rounds), count + 1
+        return choice_distribution(keys, first, final), tokens + sum(t for _, t in rounds), len(groups) + 1
 
     async def decide(self, body):
         qs = validate(body, self.cfg)
@@ -190,23 +228,19 @@ class DecisionService:
             typ = q["type"]
             if typ == "choice":
                 p, n, calls = await self.choice(body["state"], key, q)
-                answers[key] = {"type": typ, "choice": max(p, key=p.get), "probabilities": p}
             else:
                 native = {"id": key, "question": text(q.get("instructions", ""))}
                 c = q.get("criteria") or {}
                 if typ == "noul":
                     native.update(type="yes_no", yes=c.get("yes", c.get("true")), no=c.get("no", c.get("false")))
                     p, n = await self.read(body["state"], native, ["no", "yes"])
-                    answers[key] = {"type": typ, "noul": p["yes"], "probabilities": p}
                 else:
                     levels = list(c.values()) if isinstance(c, dict) else c
                     native.update(type="score", levels=levels)
                     ids = [str(i) for i in range(len(levels))]
                     p, n = await self.read(body["state"], native, ids)
-                    names = list(c) if isinstance(c, dict) else ids
-                    mapped = dict(zip(names, p.values()))
-                    answers[key] = {"type": typ, "score": math.fsum(float(k) * v for k, v in mapped.items()), "probabilities": mapped}
                 calls = 1
+            answers[key] = answer(q, p)
             tokens += n
             passes += calls
         return {"model": self.cfg.model, "answers": answers,
